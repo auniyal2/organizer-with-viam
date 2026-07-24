@@ -16,6 +16,7 @@ import argparse
 import asyncio
 import os
 
+from grpclib.exceptions import GRPCError
 from viam.robot.client import RobotClient
 from viam.components.gripper import Gripper
 from viam.proto.common import Pose, PoseInFrame
@@ -83,6 +84,10 @@ TABLE_Y_RANGE = (0.0, 2000.0)
 
 # GetObjectPointClouds occasionally drops the connection over this network path; retry rather than fail outright.
 SEGMENT_RETRIES = 4
+
+# the robot connection occasionally drops mid-run, which expires the motion session server-side and fails
+# the next command with SESSION_EXPIRED; reconnect and retry that color's sort rather than aborting the run.
+SESSION_EXPIRED_RETRIES = 2
 
 
 async def connect() -> RobotClient:
@@ -216,7 +221,17 @@ async def main() -> None:
     robot = await connect()
     try:
         for color in COLORS:
-            await sort_color(robot, color, args.execute)
+            for attempt in range(1, SESSION_EXPIRED_RETRIES + 2):
+                try:
+                    await sort_color(robot, color, args.execute)
+                    break
+                except GRPCError as e:
+                    if e.message != "SESSION_EXPIRED" or attempt > SESSION_EXPIRED_RETRIES:
+                        raise
+                    print(f"session expired sorting {color['name']} (attempt {attempt}/{SESSION_EXPIRED_RETRIES}), "
+                          f"reconnecting and retrying")
+                    await robot.close()
+                    robot = await connect()
     finally:
         await robot.close()
 
